@@ -102,6 +102,9 @@ config WANT_GPIO_BITBANGING
     bool
     depends on HAVE_GPIO
     default y
+config WANT_HX71X
+    bool "Support HX711 and HX717 ADC chips"
+    depends on HAVE_GPIO_BITBANGING
 config WANT_DISPLAYS
     bool
     depends on HAVE_GPIO
@@ -128,7 +131,7 @@ config WANT_SOFTWARE_SPI
     default y
 config NEED_SENSOR_BULK
     bool
-    depends on WANT_SENSORS || WANT_LIS2DW || WANT_LDC1612
+    depends on WANT_SENSORS || WANT_LIS2DW || WANT_LDC1612 || WANT_HX71X
     default y
 
 menu "Optional features (to reduce code size)"
@@ -156,6 +159,11 @@ config WANT_SOFTWARE_SPI
     depends on HAVE_GPIO && HAVE_GPIO_SPI
 endmenu
 
+config WANT_LOAD_CELL_PROBE
+    bool "Support load cell probe"
+config WANT_SOS_FILTER
+    bool "Support second order section filter"
+    
 # Generic configuration options for CANbus
 config CANSERIAL
     bool
