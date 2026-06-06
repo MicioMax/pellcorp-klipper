@@ -39,6 +39,22 @@ watchdog_task(void)
 DECL_TASK(watchdog_task);
 
 void
+bootloader_request(void)
+{
+    irq_disable();
+
+    // Creality GD32E230 bed MCU bootloader request magic.
+    *(volatile uint32_t *)0x40002854 = 0x4254;
+
+    // ARM Cortex-M system reset: SCB->AIRCR = VECTKEY | SYSRESETREQ.
+    *(volatile uint32_t *)0xE000ED0C = 0x05FA0004;
+
+    for (;;)
+        ;
+}
+
+
+void
 watchdog_init(void)
 {
 	uint32_t timeout = FWDGT_PSC_TIMEOUT;
