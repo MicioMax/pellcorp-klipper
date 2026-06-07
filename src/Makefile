@@ -23,4 +23,5 @@ src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c
 src-$(CONFIG_NEED_SENSOR_BULK) += sensor_bulk.c
 src-$(CONFIG_WANT_HX71X) += sensor_hx71x.c
 src-$(CONFIG_WANT_LOAD_CELL_PROBE) += load_cell_probe.c
+src-$(CONFIG_WANT_LOAD_CELL_PROBE) += mdf_loadcell_tools.c
 src-$(CONFIG_WANT_SOS_FILTER) += sos_filter.c
