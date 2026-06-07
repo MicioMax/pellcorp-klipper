@@ -55,6 +55,8 @@ struct load_cell_probe {
     fixedQ16_t trigger_grams_fixed;
     fixedQ2_t grams_per_count;
     struct sos_filter *sf;
+    fixedQ16_t last_filtered_grams;
+    int32_t last_raw_sample;
 };
 
 static inline uint8_t
@@ -162,6 +164,9 @@ load_cell_probe_report_sample(struct load_cell_probe *lce
     // perform filtering
     const fixedQ16_t filtered_grams = sosfilt(lce->sf, (fixedQ16_t)raw_grams);
 
+    lce->last_filtered_grams = filtered_grams;
+    lce->last_raw_sample = sample;
+    
     // update trigger state
     if (abs(filtered_grams) >= lce->trigger_grams_fixed) {
         try_trigger(lce, lce->last_sample_ticks);
@@ -228,6 +233,9 @@ command_config_load_cell_probe(uint32_t *args)
     lce->watchdog_count = 0;
     lce->sf = sos_filter_oid_lookup(args[1]);
     set_endstop_range(lce, 0, 0, 0, 0, 0);
+
+    lce->last_filtered_grams = 0;
+    lce->last_raw_sample = 0;
 }
 DECL_COMMAND(command_config_load_cell_probe, "config_load_cell_probe"
                                                " oid=%c sos_filter_oid=%c");
@@ -296,3 +304,8 @@ command_load_cell_probe_query_state(uint32_t *args)
 }
 DECL_COMMAND(command_load_cell_probe_query_state
                 , "load_cell_probe_query_state oid=%c");
+int32_t
+load_cell_probe_get_last_filtered_grams(struct load_cell_probe *lce)
+{
+    return lce->last_filtered_grams;
+}
