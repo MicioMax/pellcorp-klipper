@@ -127,6 +127,11 @@ void
 load_cell_probe_report_sample(struct load_cell_probe *lce
                                 , const int32_t sample)
 {
+    // Always save the latest raw sample
+    uint32_t ticks = timer_read_time();
+    lce->last_sample_ticks = ticks;
+    lce->last_raw_sample = sample;
+
     // only process samples when homing
     uint8_t is_homing = is_flag_set(FLAG_IS_HOMING, lce);
     if (!is_homing) {
@@ -134,7 +139,6 @@ load_cell_probe_report_sample(struct load_cell_probe *lce
     }
 
     // save new sample
-    uint32_t ticks = timer_read_time();
     lce->last_sample_ticks = ticks;
     lce->watchdog_count = 0;
 
@@ -245,6 +249,12 @@ struct load_cell_probe *
 load_cell_probe_oid_lookup(uint8_t oid)
 {
     return oid_lookup(oid, command_config_load_cell_probe);
+}
+
+int32_t
+load_cell_probe_get_last_raw_sample(struct load_cell_probe *lce)
+{
+    return lce->last_raw_sample;
 }
 
 // Set the triggering range and tare value
