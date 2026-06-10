@@ -13,6 +13,15 @@
 #include "command.h" // output_P
 #include "sched.h" // sched_is_shutdown
 
+#ifdef BOARD_FW_VERSION
+#define FIRMWARE_VERSION BOARD_FW_VERSION
+static const char software_version[32]
+    __attribute__((section("SV_SECTION")))
+    __attribute__((used))
+    __attribute__((aligned(4))) = { FIRMWARE_VERSION };
+#endif
+
+
 static uint8_t next_sequence = MESSAGE_DEST;
 
 static uint32_t
