@@ -4,6 +4,9 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
+# host file
+host-tool-src = tool/host_crc16.c
+
 # Output directory
 OUT=out/
 
@@ -52,6 +55,41 @@ Q=
 else
 Q=@
 MAKEFLAGS += --no-print-directory
+endif
+
+
+##### Process board hardware and firmware version
+
+ifeq ($(CONFIG_BOARD_INFO_CONFIGURE),y)
+
+ifeq ($(CONFIG_MAIN_MCU_BOARD),y)
+board_type := mcu
+else ifeq ($(CONFIG_NOZZLE_MCU_BOARD),y)
+board_type := noz
+else ifeq ($(CONFIG_BED_MCU_BOARD),y)
+board_type := bed
+endif
+
+ifneq ($(CONFIG_MCU_MENU),)
+mcu_menu := $(patsubst "%",%,$(CONFIG_MCU_MENU))
+else ifeq ($(CONFIG_MACH_GD32),y)
+mcu_menu := G
+else
+mcu_menu :=
+endif
+
+ifneq ($(CONFIG_MCU_TYPE),)
+mcu_type := $(patsubst "%",%,$(CONFIG_MCU_TYPE))
+else
+mcu_type :=
+endif
+
+board_hw_version := $(board_type)$(CONFIG_MCU_BOARD_ID)_$(CONFIG_MCU_BOARD_HW_VER)_$(mcu_menu)$(mcu_type)
+board_fw_version := $(board_type)$(CONFIG_MCU_BOARD_ID)_$(CONFIG_MCU_BOARD_FW_VER)_$(CONFIG_MCU_BOARD_FW_RESERVED)
+
+CFLAGS += -DBOARD_FW_VERSION=\"$(board_fw_version)\"
+
+export board_hw_version board_fw_version
 endif
 
 # Include board specific makefile
@@ -131,3 +169,7 @@ distclean: clean
 	$(Q)rm -f .config .config.old
 
 -include $(OUT)*.d $(patsubst %,$(OUT)%/*.d,$(dirs-y))
+
+$(OUT)hostCrc16.elf: $(host-tool-src)
+	@echo "  Compiling and Linking $@"
+	$(Q)gcc $< -o $@
