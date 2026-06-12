@@ -54,6 +54,7 @@ class HX71xBase:
         # Command Configuration
         self.query_hx71x_cmd = None
         self.attach_probe_cmd = None
+        self.attach_probe_cell_cmd = None
         mcu.add_config_cmd(
             "config_hx71x oid=%d gain_channel=%d dout_pin=%s sclk_pin=%s"
             % (self.oid, self.gain_channel, self.dout_pin, self.sclk_pin))
@@ -67,6 +68,9 @@ class HX71xBase:
             "query_hx71x oid=%c rest_ticks=%u")
         self.attach_probe_cmd = self.mcu.lookup_command(
             "hx71x_attach_load_cell_probe oid=%c load_cell_probe_oid=%c")
+        self.attach_probe_cell_cmd = self.mcu.lookup_command(
+            "hx71x_attach_load_cell_probe_cell oid=%c load_cell_probe_oid=%c"
+            " cell_index=%c")
         self.ffreader.setup_query_command("query_hx71x_status oid=%c",
                                           oid=self.oid,
                                           cq=self.mcu.alloc_command_queue())
@@ -89,6 +93,13 @@ class HX71xBase:
 
     def attach_load_cell_probe(self, load_cell_probe_oid):
         self.attach_probe_cmd.send([self.oid, load_cell_probe_oid])
+
+    def attach_load_cell_probe_cell(self, load_cell_probe_oid, cell_index):
+        self.attach_probe_cell_cmd.send(
+            [self.oid, load_cell_probe_oid, cell_index])
+
+    def get_oid(self):
+        return self.oid
 
     # Measurement decoding
     def _convert_samples(self, samples):

@@ -255,6 +255,9 @@ class LoadCellProbeConfigHelper:
             default=75, minval=10, maxval=250)
         self._force_safety_limit_param = intParamHelper(config,
             'force_safety_limit', minval=100, maxval=5000, default=2000)
+        # 0 = legacy MCU path. Non-zero enables indexed-cell MCU path.
+        self._cell_mask_param = intParamHelper(config, 'cell_mask',
+            minval=0, maxval=15, default=0)
 
     def get_tare_samples(self, gcmd=None):
         tare_time = self._tare_time_param.get(gcmd)
@@ -266,6 +269,9 @@ class LoadCellProbeConfigHelper:
 
     def get_safety_limit_grams(self, gcmd=None):
         return self._force_safety_limit_param.get(gcmd)
+
+    def get_cell_mask(self, gcmd=None):
+        return self._cell_mask_param.get(gcmd)
 
     def get_rest_time(self):
         return self._rest_time
@@ -319,6 +325,9 @@ class McuLoadCellProbe:
         self._home_cmd = None
         self._query_cmd = None
         self._set_range_cmd = None
+        self._set_cell_mask_cmd = None
+        self._set_cell_tare_cmd = None
+        self._mdf_force_cmd = None
         self._mcu.register_config_callback(self._build_config)
         self._printer.register_event_handler("klippy:connect", self._on_connect)
 
@@ -342,10 +351,30 @@ class McuLoadCellProbe:
             "load_cell_probe_home oid=%c trsync_oid=%c trigger_reason=%c"
             " error_reason=%c clock=%u rest_ticks=%u timeout=%u",
             cq=self._cmd_queue)
+        self._set_cell_mask_cmd = self._mcu.lookup_command(
+            "load_cell_probe_set_cell_mask oid=%c cell_mask=%c",
+            cq=self._cmd_queue)
+        self._set_cell_tare_cmd = self._mcu.lookup_command(
+            "load_cell_probe_set_cell_tare oid=%c cell_index=%c tare_counts=%i",
+            cq=self._cmd_queue)
+        self._mdf_force_cmd = self._mcu.lookup_query_command(
+            "mdf_force_query oid=%c",
+            "mdf_force_state oid=%c raw=%i",
+            oid=self._oid, cq=self._cmd_queue)
 
     # the sensor data stream is connected on the MCU at the ready event
     def _on_connect(self):
-        self._sensor.attach_load_cell_probe(self._oid)
+        cell_mask = self._config_helper.get_cell_mask()
+        if not cell_mask:
+            self._sensor.attach_load_cell_probe(self._oid)
+            return
+
+        # First indexed-path test: use the existing HX71X as cell 0.
+        if not hasattr(self._sensor, "attach_load_cell_probe_cell"):
+            raise self._printer.config_error(
+                "load_cell_probe cell_mask requires updated HX71X support")
+        self._sensor.attach_load_cell_probe_cell(self._oid, 0)
+        self._set_cell_mask_cmd.send([self._oid, cell_mask])
 
     def get_oid(self):
         return self._oid
@@ -355,6 +384,10 @@ class McuLoadCellProbe:
 
     def get_load_cell(self):
         return self._load_cell
+
+    def get_raw(self):
+        params = self._mdf_force_cmd.send([self._oid])
+        return params['raw']
 
     def get_dispatch(self):
         return self._dispatch
@@ -368,6 +401,11 @@ class McuLoadCellProbe:
             self._config_helper.get_trigger_force_grams(gcmd),
             self._config_helper.get_grams_per_count()]
         self._set_range_cmd.send(args)
+        cell_mask = self._config_helper.get_cell_mask(gcmd)
+        if cell_mask:
+            # First indexed-path test: existing HX71X is cell 0.
+            self._set_cell_tare_cmd.send([self._oid, 0, int(tare_counts)])
+            self._set_cell_mask_cmd.send([self._oid, cell_mask])
         self._sos_filter.reset_filter()
 
     def home_start(self, print_time):
@@ -638,6 +676,131 @@ class LoadCellPrinterProbe:
         probe.ProbeVirtualEndstopDeprecation(config)
         self._chipname, self._gcode_prefix = probe.lookup_probe_names(config)
         self._printer.add_object(self._chipname, self)
+        self._gcode = self._printer.lookup_object('gcode')
+        self._gcode.register_command("LC_RAW", self.cmd_LC_RAW,
+            desc=self.cmd_LC_RAW_help)
+        self._gcode.register_command("LC_FINE_PROBE", self.cmd_LC_FINE_PROBE,
+            desc=self.cmd_LC_FINE_PROBE_help)
+
+    cmd_LC_RAW_help = "Read latest raw load cell sample from bed MCU"
+
+    def cmd_LC_RAW(self, gcmd):
+        raw = self._mcu_load_cell_probe.get_raw()
+        gcmd.respond_info("raw=%d" % (raw,))
+
+    def _read_raw_average(self, samples):
+        total = 0
+        for _ in range(samples):
+            total += self._mcu_load_cell_probe.get_raw()
+        return total / float(samples)
+
+    cmd_LC_FINE_PROBE_help = "Fine load cell probe using direct Python moves and raw derivative"
+
+    def cmd_LC_FINE_PROBE(self, gcmd):
+        toolhead = self._printer.lookup_object('toolhead')
+        reactor = self._printer.get_reactor()
+
+        step = gcmd.get_float("STEP", 0.02, above=0.0, maxval=0.20)
+        max_dist = gcmd.get_float("MAX_DIST", 1.50, above=0.0, maxval=5.0)
+        speed = gcmd.get_float("SPEED", 0.20, above=0.0, maxval=5.0)
+        threshold_g = gcmd.get_float("DF_THRESHOLD", 8.0,
+            above=0.0, maxval=300.0)
+        samples = gcmd.get_int("SAMPLES", 5, minval=1, maxval=20)
+        hits_required = gcmd.get_int("HITS", 1, minval=1, maxval=10)
+        dwell = gcmd.get_float("DWELL", 0.03, minval=0.0, maxval=1.0)
+        counts_per_gram = gcmd.get_float("COUNTS_PER_GRAM", 91.2,
+            above=0.0, maxval=10000.0)
+        z_bias = gcmd.get_float("Z_BIAS", 0.0, minval=-1.0, maxval=1.0)
+
+        threshold_counts = threshold_g * counts_per_gram
+
+        toolhead.wait_moves()
+        prev_raw = self._read_raw_average(samples)
+        start_pos = toolhead.get_position()
+        start_z = start_pos[2]
+
+        gcmd.respond_info(
+            "LC_FINE_DF start_z=%.6f raw0=%.1f df_threshold=%.1fg %.1fcounts step=%.4f max_dist=%.3f hits=%d z_bias=%.4f"
+            % (start_z, prev_raw, threshold_g, threshold_counts, step,
+               max_dist, hits_required, z_bias))
+
+        moved = 0.0
+        i = 0
+        hit_count = 0
+
+        last_z = start_z
+        last_raw = prev_raw
+        last_event_df = 0.0
+
+        while moved + 1e-9 < max_dist:
+            i += 1
+            moved = min(max_dist, i * step)
+
+            pos = toolhead.get_position()
+            pos[2] = start_z - moved
+            toolhead.manual_move(pos, speed)
+            toolhead.wait_moves()
+
+            if dwell > 0.0:
+                reactor.pause(reactor.monotonic() + dwell)
+
+            raw = self._read_raw_average(samples)
+
+            # On this machine contact makes raw decrease.
+            df = raw - prev_raw
+            event_df = -df
+            if event_df < 0.0:
+                event_df = 0.0
+
+            event_g = event_df / counts_per_gram
+
+            if event_df >= threshold_counts:
+                hit_count += 1
+            else:
+                hit_count = 0
+
+            gcmd.respond_info(
+                "LC_FINE i=%02d z=%.6f raw=%.1f df=%.1f event_df=%.1f event=%.1fg hits=%d"
+                % (i, pos[2], raw, df, event_df, event_g, hit_count))
+
+            if hit_count >= hits_required:
+                # Linear interpolation between previous point and current point.
+                est_z = pos[2]
+                if event_df != last_event_df:
+                    ratio = ((threshold_counts - last_event_df)
+                             / (event_df - last_event_df))
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    if ratio > 1.0:
+                        ratio = 1.0
+                    est_z = last_z + ratio * (pos[2] - last_z)
+
+                touch_z = est_z + z_bias
+
+                # If a Z bias is supplied, move back up to the corrected
+                # practical contact/reference height before returning.
+                if abs(z_bias) > 0.000001:
+                    corrected_pos = toolhead.get_position()
+                    corrected_pos[2] = touch_z
+                    toolhead.manual_move(corrected_pos, speed)
+                    toolhead.wait_moves()
+
+                est_event_g = threshold_counts / counts_per_gram
+                gcmd.respond_info(
+                    "LC_FINE_PROBE trigger z=%.6f est_z=%.6f z_bias=%.4f touch_z=%.6f raw=%.1f event_df=%.1f event=%.1fg threshold=%.1fg moved=%.4f"
+                    % (pos[2], est_z, z_bias, touch_z, raw, event_df,
+                       event_g, est_event_g, moved))
+                return
+
+            last_z = pos[2]
+            last_raw = raw
+            last_event_df = event_df
+            prev_raw = raw
+
+        gcmd.respond_info(
+            "LC_FINE_PROBE no_trigger start_z=%.6f end_z=%.6f raw=%.1f event_df=%.1f event=%.1fg"
+            % (start_z, start_z - moved, last_raw, last_event_df,
+               last_event_df / counts_per_gram))
 
     def get_probe_params(self, gcmd=None):
         return self._param_helper.get_probe_params(gcmd)
