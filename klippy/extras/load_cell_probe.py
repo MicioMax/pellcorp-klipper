@@ -705,6 +705,10 @@ class LoadCellPrinterProbe:
         speed = gcmd.get_float("SPEED", 0.20, above=0.0, maxval=5.0)
         threshold_g = gcmd.get_float("DF_THRESHOLD", 8.0,
             above=0.0, maxval=300.0)
+        cum_threshold_g = gcmd.get_float("CUM_THRESHOLD", 0.0,
+            minval=0.0, maxval=300.0)
+        force_max_g = gcmd.get_float("FORCE_MAX", 80.0,
+            above=0.0, maxval=1000.0)
         samples = gcmd.get_int("SAMPLES", 5, minval=1, maxval=20)
         hits_required = gcmd.get_int("HITS", 1, minval=1, maxval=10)
         dwell = gcmd.get_float("DWELL", 0.03, minval=0.0, maxval=1.0)
@@ -713,6 +717,8 @@ class LoadCellPrinterProbe:
         z_bias = gcmd.get_float("Z_BIAS", 0.0, minval=-1.0, maxval=1.0)
 
         threshold_counts = threshold_g * counts_per_gram
+        cum_threshold_counts = cum_threshold_g * counts_per_gram
+        force_max_counts = force_max_g * counts_per_gram
 
         toolhead.wait_moves()
         prev_raw = self._read_raw_average(samples)
@@ -720,9 +726,10 @@ class LoadCellPrinterProbe:
         start_z = start_pos[2]
 
         gcmd.respond_info(
-            "LC_FINE_DF start_z=%.6f raw0=%.1f df_threshold=%.1fg %.1fcounts step=%.4f max_dist=%.3f hits=%d z_bias=%.4f"
-            % (start_z, prev_raw, threshold_g, threshold_counts, step,
-               max_dist, hits_required, z_bias))
+            "LC_FINE_DF start_z=%.6f raw0=%.1f df_threshold=%.1fg %.1fcounts cum_threshold=%.1fg force_max=%.1fg step=%.4f max_dist=%.3f hits=%d z_bias=%.4f"
+            % (start_z, prev_raw, threshold_g, threshold_counts,
+               cum_threshold_g, force_max_g, step, max_dist,
+               hits_required, z_bias))
 
         moved = 0.0
         i = 0
@@ -731,6 +738,8 @@ class LoadCellPrinterProbe:
         last_z = start_z
         last_raw = prev_raw
         last_event_df = 0.0
+        last_cum_df = 0.0
+        raw0 = prev_raw
 
         while moved + 1e-9 < max_dist:
             i += 1
@@ -754,19 +763,50 @@ class LoadCellPrinterProbe:
 
             event_g = event_df / counts_per_gram
 
-            if event_df >= threshold_counts:
+            # Cumulative contact force from the beginning of the fine probe.
+            # On this machine contact makes raw decrease.
+            cum_df = -(raw - raw0)
+            if cum_df < 0.0:
+                cum_df = 0.0
+            cum_g = cum_df / counts_per_gram
+
+            if cum_df >= force_max_counts:
+                safe_pos = toolhead.get_position()
+                safe_pos[2] += 1.0
+                toolhead.manual_move(safe_pos, speed)
+                toolhead.wait_moves()
+                raise gcmd.error(
+                    "LC_FINE_PROBE force safety abort z=%.6f raw=%.1f cum=%.1fg max=%.1fg"
+                    % (pos[2], raw, cum_g, force_max_g))
+
+            event_hit = event_df >= threshold_counts
+            cum_hit = (cum_threshold_g > 0.0
+                       and cum_df >= cum_threshold_counts)
+
+            if event_hit or cum_hit:
                 hit_count += 1
             else:
                 hit_count = 0
 
             gcmd.respond_info(
-                "LC_FINE i=%02d z=%.6f raw=%.1f df=%.1f event_df=%.1f event=%.1fg hits=%d"
-                % (i, pos[2], raw, df, event_df, event_g, hit_count))
+                "LC_FINE i=%02d z=%.6f raw=%.1f df=%.1f event_df=%.1f event=%.1fg cum_df=%.1f cum=%.1fg hit=%s hits=%d"
+                % (i, pos[2], raw, df, event_df, event_g, cum_df,
+                   cum_g, "cum" if cum_hit else ("df" if event_hit else "-"),
+                   hit_count))
 
             if hit_count >= hits_required:
                 # Linear interpolation between previous point and current point.
                 est_z = pos[2]
-                if event_df != last_event_df:
+                if cum_hit and cum_threshold_g > 0.0:
+                    if cum_df != last_cum_df:
+                        ratio = ((cum_threshold_counts - last_cum_df)
+                                 / (cum_df - last_cum_df))
+                        if ratio < 0.0:
+                            ratio = 0.0
+                        if ratio > 1.0:
+                            ratio = 1.0
+                        est_z = last_z + ratio * (pos[2] - last_z)
+                elif event_df != last_event_df:
                     ratio = ((threshold_counts - last_event_df)
                              / (event_df - last_event_df))
                     if ratio < 0.0:
@@ -786,21 +826,25 @@ class LoadCellPrinterProbe:
                     toolhead.wait_moves()
 
                 est_event_g = threshold_counts / counts_per_gram
+                trigger_mode = "cum" if cum_hit else "df"
                 gcmd.respond_info(
-                    "LC_FINE_PROBE trigger z=%.6f est_z=%.6f z_bias=%.4f touch_z=%.6f raw=%.1f event_df=%.1f event=%.1fg threshold=%.1fg moved=%.4f"
-                    % (pos[2], est_z, z_bias, touch_z, raw, event_df,
-                       event_g, est_event_g, moved))
+                    "LC_FINE_PROBE trigger mode=%s z=%.6f est_z=%.6f z_bias=%.4f touch_z=%.6f raw=%.1f event_df=%.1f event=%.1fg cum_df=%.1f cum=%.1fg threshold=%.1fg cum_threshold=%.1fg moved=%.4f"
+                    % (trigger_mode, pos[2], est_z, z_bias, touch_z, raw,
+                       event_df, event_g, cum_df, cum_g, est_event_g,
+                       cum_threshold_g, moved))
                 return
 
             last_z = pos[2]
             last_raw = raw
             last_event_df = event_df
+            last_cum_df = cum_df
             prev_raw = raw
 
         gcmd.respond_info(
-            "LC_FINE_PROBE no_trigger start_z=%.6f end_z=%.6f raw=%.1f event_df=%.1f event=%.1fg"
+            "LC_FINE_PROBE no_trigger start_z=%.6f end_z=%.6f raw=%.1f event_df=%.1f event=%.1fg cum_df=%.1f cum=%.1fg"
             % (start_z, start_z - moved, last_raw, last_event_df,
-               last_event_df / counts_per_gram))
+               last_event_df / counts_per_gram, last_cum_df,
+               last_cum_df / counts_per_gram))
 
     def get_probe_params(self, gcmd=None):
         return self._param_helper.get_probe_params(gcmd)
